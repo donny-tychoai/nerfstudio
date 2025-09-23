@@ -386,7 +386,7 @@ class Nerfstudio(DataParser):
 
                     # This was the applied_transform value
 
-                    with open(self.config.data / "transforms.json", "w", encoding="utf-8") as f:
+                    with open(self.cAConfig.data / "transforms.json", "w", encoding="utf-8") as f:
                         json.dump(transforms, f, indent=4)
                 else:
                     ply_file_path = None

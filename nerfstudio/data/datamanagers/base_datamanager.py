@@ -106,7 +106,6 @@ class DataManager:
     vanilla nerf paradigm of single-scene, fixed-images, no-learnt-latents.
     We can now support variable scenes, variable number of images, and arbitrary latents.
 
-
     Train Methods:
         setup_train: sets up for being used as train
         iter_train: will be called on __iter__() for the train iterator

@@ -40,7 +40,7 @@ from nerfstudio.model_components.scene_colliders import NearFarCollider
 @dataclass
 class ModelConfig(InstantiateConfig):
     """Configuration for model instantiation"""
-
+    
     _target: Type = field(default_factory=lambda: Model)
     """target class to instantiate"""
     enable_collider: bool = True
