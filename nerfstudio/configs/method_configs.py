@@ -34,13 +34,14 @@ from nerfstudio.data.dataparsers.blender_dataparser import BlenderDataParserConf
 from nerfstudio.data.dataparsers.dnerf_dataparser import DNeRFDataParserConfig
 from nerfstudio.data.dataparsers.instant_ngp_dataparser import InstantNGPDataParserConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
+from nerfstudio.data.dataparsers.colmap_dataparser import ColmapDataParserConfig
 from nerfstudio.data.dataparsers.phototourism_dataparser import PhototourismDataParserConfig
 from nerfstudio.data.dataparsers.sdfstudio_dataparser import SDFStudioDataParserConfig
 from nerfstudio.data.dataparsers.sitcoms3d_dataparser import Sitcoms3DDataParserConfig
 from nerfstudio.data.datasets.depth_dataset import DepthDataset
 from nerfstudio.data.datasets.sdf_dataset import SDFDataset
 from nerfstudio.data.datasets.semantic_dataset import SemanticDataset
-from nerfstudio.engine.optimizers import AdamOptimizerConfig, RAdamOptimizerConfig
+from nerfstudio.engine.optimizers import AdamOptimizerConfig, RAdamOptimizerConfig, SparseAdamOptimizerConfig
 from nerfstudio.engine.schedulers import (
     CosineDecaySchedulerConfig,
     ExponentialDecaySchedulerConfig,
@@ -63,6 +64,7 @@ from nerfstudio.models.vanilla_nerf import NeRFModel, VanillaModelConfig
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
 from nerfstudio.pipelines.dynamic_batch import DynamicBatchPipelineConfig
 from nerfstudio.plugins.registry import discover_methods
+
 
 method_configs: Dict[str, Union[TrainerConfig, ExternalMethodDummyTrainerConfig]] = {}
 descriptions = {
@@ -652,7 +654,7 @@ method_configs["splatfacto-big"] = TrainerConfig(
     steps_per_eval_batch=0,
     steps_per_save=2000,
     steps_per_eval_all_images=1000,
-    max_num_iterations=30000,
+    max_num_iterations=50000,
     mixed_precision=False,
     pipeline=VanillaPipelineConfig(
         datamanager=FullImageDatamanagerConfig(
@@ -662,6 +664,7 @@ method_configs["splatfacto-big"] = TrainerConfig(
         model=SplatfactoModelConfig(
             cull_alpha_thresh=0.005,
             densify_grad_thresh=0.0005,
+            cull_screen_size=.1,
         ),
     ),
     optimizers={
@@ -681,7 +684,7 @@ method_configs["splatfacto-big"] = TrainerConfig(
             "scheduler": None,
         },
         "opacities": {
-            "optimizer": AdamOptimizerConfig(lr=0.05, eps=1e-15),
+            "optimizer": AdamOptimizerConfig(lr=0.1, eps=1e-15),
             "scheduler": None,
         },
         "scales": {
@@ -712,17 +715,27 @@ method_configs["splatfacto-mcmc"] = TrainerConfig(
     steps_per_eval_batch=0,
     steps_per_save=2000,
     steps_per_eval_all_images=1000,
-    max_num_iterations=30000,
+    max_num_iterations=60000,
     mixed_precision=False,
     pipeline=VanillaPipelineConfig(
         datamanager=FullImageDatamanagerConfig(
-            dataparser=NerfstudioDataParserConfig(load_3D_points=True),
+            dataparser=ColmapDataParserConfig(load_3D_points=True),
             cache_images_type="uint8",
+            cache_images = "disk",
         ),
         model=SplatfactoModelConfig(
+            use_bilateral_grid=True,
+            grid_shape = (16,16,8),
+            warmup_length=3000,
+            refine_every=1000,
             strategy="mcmc",
-            cull_alpha_thresh=0.005,
-            stop_split_at=25000,
+            num_random = 100000,
+            max_gs_num = 6000000,
+            noise_lr =  5e5,
+            mcmc_opacity_reg = 0.1,
+            mcmc_scale_reg = .01,
+            cull_alpha_thresh=0.007,
+            stop_split_at=50000,
         ),
     ),
     optimizers={
@@ -730,7 +743,7 @@ method_configs["splatfacto-mcmc"] = TrainerConfig(
             "optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15),
             "scheduler": ExponentialDecaySchedulerConfig(
                 lr_final=1.6e-6,
-                max_steps=30000,
+                max_steps=25000,
             ),
         },
         "features_dc": {
@@ -746,10 +759,11 @@ method_configs["splatfacto-mcmc"] = TrainerConfig(
             "scheduler": None,
         },
         "scales": {
-            "optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15),
+            "optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15),
             "scheduler": None,
         },
         "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": None},
+        
         "camera_opt": {
             "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
             "scheduler": ExponentialDecaySchedulerConfig(
@@ -766,7 +780,6 @@ method_configs["splatfacto-mcmc"] = TrainerConfig(
     viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
     vis="viewer",
 )
-
 
 def merge_methods(methods, method_descriptions, new_methods, new_descriptions, overwrite=True):
     """Merge new methods and descriptions into existing methods and descriptions.

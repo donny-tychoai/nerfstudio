@@ -72,7 +72,7 @@ class FullImageDatamanagerConfig(DataManagerConfig):
     """The image type returned from manager, caching images in uint8 saves memory"""
     max_thread_workers: Optional[int] = None
     """The maximum number of threads to use for caching images. If None, uses all available threads."""
-    train_cameras_sampling_strategy: Literal["random", "fps"] = "random"
+    train_cameras_sampling_strategy: Literal["random", "fps"] = "fps"
     """Specifies which sampling strategy is used to generate train cameras, 'random' means sampling 
     uniformly random without replacement, 'fps' means farthest point sampling which is helpful to reduce the artifacts 
     due to oversampling subsets of cameras that are very close to each other."""
@@ -388,10 +388,11 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         Returns a Camera instead of raybundle"""
         self.train_count += 1
         if self.config.cache_images == "disk":
-            camera, data = next(self.iter_train_image_dataloader)[0]
+
+            camera, data, disparity_tensor = next(self.iter_train_image_dataloader)[0]
             camera = camera.to(self.device)
             data = get_dict_to_torch(data, self.device)
-            return camera, data
+            return camera, data, disparity_tensor
 
         image_idx = self.train_unseen_cameras.pop(0)
         # Make sure to re-populate the unseen cameras list if we have exhausted it

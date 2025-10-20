@@ -2,6 +2,7 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
+# You may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -60,6 +61,15 @@ class AdamOptimizerConfig(OptimizerConfig):
     _target: Type = torch.optim.Adam
     weight_decay: float = 0
     """The weight decay to use."""
+
+
+@dataclass
+class SparseAdamOptimizerConfig(OptimizerConfig):
+    """Basic optimizer config with SparseAdam"""
+
+    _target: Type = torch.optim.SparseAdam
+    """The optimizer class to use."""
+    # Note: SparseAdam does not support weight_decay
 
 
 @dataclass

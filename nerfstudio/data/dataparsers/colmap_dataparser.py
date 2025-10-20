@@ -85,7 +85,7 @@ class ColmapDataParserConfig(DataParserConfig):
     """
     train_split_fraction: float = 0.9
     """The fraction of images to use for training. The remaining images are for eval."""
-    eval_interval: int = 8
+    eval_interval: int = 100
     """The interval between frames to use for eval. Only used when eval_mode is eval-interval."""
     depth_unit_scale_factor: float = 1e-3
     """Scales the depth values to meters. Default value is 0.001 for a millimeter to meter conversion."""
@@ -184,14 +184,13 @@ class ColmapDataParser(DataParser):
                 )
             if self.config.depths_path is not None:
                 frame["depth_path"] = (
-                    (self.config.data / self.config.depths_path / im_data.name).with_suffix(".png").as_posix()
+                    (self.config.data / self.config.depths_path / im_data.name).with_suffix(".npy").as_posix()
                 )
             frames.append(frame)
             if camera_model is not None:
                 assert camera_model == frame["camera_model"], "Multiple camera models are not supported"
             else:
                 camera_model = frame["camera_model"]
-
         out = {}
         out["frames"] = frames
         if self.config.assume_colmap_world_coordinate_convention:

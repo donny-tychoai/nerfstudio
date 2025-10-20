@@ -179,7 +179,7 @@ class Nerfstudio(DataParser):
 
             if "depth_file_path" in frame:
                 depth_filepath = Path(frame["depth_file_path"])
-                depth_fname = self._get_fname(depth_filepath, data_dir, downsample_folder_prefix="depths_")
+                depth_fname = self._get_fname(depth_filepath, data_dir, downsample_folder_prefix="estimated_disparity_")
                 depth_filenames.append(depth_fname)
 
         assert len(mask_filenames) == 0 or (len(mask_filenames) == len(image_filenames)), """

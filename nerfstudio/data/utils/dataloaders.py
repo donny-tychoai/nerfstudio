@@ -258,6 +258,7 @@ def undistort_view(
     """
     data = dataset.get_data(idx, image_type)
     camera = dataset.cameras[idx].reshape(())
+  
     assert data["image"].shape[1] == camera.width.item() and data["image"].shape[0] == camera.height.item(), (
         f"The size of image ({data['image'].shape[1]}, {data['image'].shape[0]}) loaded "
         f"does not match the camera parameters ({camera.width.item(), camera.height.item()}), idx = {idx}"
@@ -267,10 +268,10 @@ def undistort_view(
     K = camera.get_intrinsics_matrices().numpy()
     distortion_params = camera.distortion_params.numpy()
     image = data["image"].numpy()
-    K, image, mask = _undistort_image(camera, distortion_params, data, image, K)
+    # K, image, mask = _undistort_image(camera, distortion_params, data, image, K)
     data["image"] = torch.from_numpy(image)
-    if mask is not None:
-        data["mask"] = mask
+    # if mask is not None:
+    #     data["mask"] = mask
 
     # create a new Camera with the rectified / undistorted intrinsics
     new_camera = Cameras(
@@ -635,7 +636,14 @@ class ImageBatchStream(IterableDataset):
                 r.shuffle(worker_indices)
                 i = 0
             idx = worker_indices[i]  # idx refers to the actual datapoint index this worker will retrieve
+            # data = self.input_dataset.get_data(idx, self.cache_images_type)
+            # camera = self.input_dataset.cameras[idx]
             camera, data = undistort_view(idx, self.input_dataset, self.cache_images_type)  # type: ignore
+            if self.input_dataset._dataparser_outputs.metadata["depth_filenames"]:
+                disparity_tensor = torch.from_numpy(np.load(self.input_dataset._dataparser_outputs.metadata["depth_filenames"][idx]))
+            else:
+                disparity_tensor = None
+
             if camera.metadata is None:
                 camera.metadata = {}
             camera.metadata["cam_idx"] = idx
@@ -645,8 +653,7 @@ class ImageBatchStream(IterableDataset):
                 camera, data = self.custom_image_processor(camera, data)
 
             i += 1
-            yield camera, data
-
+            yield camera, data, disparity_tensor
 
 class EvalDataloader(DataLoader):
     """Evaluation dataloader base class

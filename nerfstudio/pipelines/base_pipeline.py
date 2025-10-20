@@ -40,7 +40,6 @@ from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttrib
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import profiler
 
-
 def module_wrapper(ddp_or_model: Union[DDP, Model]) -> Model:
     """
     If DDP, then return the .module. Otherwise, return the model.
@@ -48,7 +47,6 @@ def module_wrapper(ddp_or_model: Union[DDP, Model]) -> Model:
     if isinstance(ddp_or_model, DDP):
         return cast(Model, ddp_or_model.module)
     return ddp_or_model
-
 
 class Pipeline(nn.Module):
     """The intent of this class is to provide a higher level interface for the Model
@@ -274,6 +272,7 @@ class VanillaPipeline(Pipeline):
             grad_scaler=grad_scaler,
             seed_points=seed_pts,
         )
+
         self.model.to(device)
 
         self.world_size = world_size
@@ -295,10 +294,19 @@ class VanillaPipeline(Pipeline):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
-        ray_bundle, batch = self.datamanager.next_train(step)
-        model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
+        ray_bundle, batch, disparity_tensor = self.datamanager.next_train(step)
+
+        #ray_bundle, batch = self.datamanager.next_train(step)
+        model_outputs = self._model(ray_bundle)
+
+        # print(f"Disparity tensor: {disparity_tensor.shape} ") 
+        # print(f"Rendered Depth: {model_outputs['depth'].shape}")
+        # print(f"Rendered RGB: {model_outputs['rgb'].shape}")
+        # print(f"GT RGB: {batch['image'].shape}")
+        # print("---------------------")
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
-        loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
+        loss_dict = self.model.get_loss_dict(model_outputs, batch, disparity_tensor, metrics_dict)
+        #loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
 
         return model_outputs, loss_dict, metrics_dict
 
@@ -377,7 +385,7 @@ class VanillaPipeline(Pipeline):
         ) as progress:
             task = progress.add_task("[green]Evaluating all images...", total=num_images)
             idx = 0
-            for camera, batch in data_loader:
+            for camera, batch, disparity in data_loader:
                 # time this the following line
                 inner_start = time()
                 outputs = self.model.get_outputs_for_camera(camera=camera)

@@ -50,6 +50,9 @@ from nerfstudio.viewer_legacy.server.viewer_state import ViewerLegacyState
 TRAIN_INTERATION_OUTPUT = Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]
 TORCH_DEVICE = str
 
+torch.set_float32_matmul_precision("high")
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 @dataclass
 class TrainerConfig(ExperimentConfig):
@@ -71,7 +74,7 @@ class TrainerConfig(ExperimentConfig):
     """Whether or not to use mixed precision for training."""
     use_grad_scaler: bool = False
     """Use gradient scaler even if the automatic mixed precision is disabled."""
-    save_only_latest_checkpoint: bool = True
+    save_only_latest_checkpoint: bool = False
     """Whether to only save the latest checkpoint or all checkpoints."""
     # optional parameters if we want to resume training
     load_dir: Optional[Path] = None
@@ -507,6 +510,7 @@ class Trainer:
             for group in self.optimizers.parameters.keys()
             if step % self.gradient_accumulation_steps[group] == self.gradient_accumulation_steps[group] - 1
         ]
+        
         self.optimizers.optimizer_scaler_step_some(self.grad_scaler, needs_step)
 
         if self.config.log_gradients:

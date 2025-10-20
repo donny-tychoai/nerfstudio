@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional, Tuple, Type, Union
 
 import torch
+import torch.nn.functional as F
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 
 try:
@@ -61,6 +62,76 @@ def resize_image(image: torch.Tensor, d: int):
     weight = (1.0 / (d * d)) * torch.ones((1, 1, d, d), dtype=torch.float32, device=image.device)
     return tf.conv2d(image.permute(2, 0, 1)[:, None, ...], weight, stride=d).squeeze(1).permute(1, 2, 0)
 
+@torch_compile()
+def compute_depth_loss(
+    rendered_depth: torch.Tensor, 
+    disparity_tensor: torch.Tensor, 
+    depth_loss_weight: float = 0.01,
+    border_ratio: float = 0.08,
+    save_debug_plot: bool = False
+) -> torch.Tensor:
+    """
+    Computes the Scale-Invariant Depth Loss (L_depth) between rendered depth 
+    and Depth-Anything-V2 disparity, incorporating a border mask.
+
+    Args:
+        rendered_depth: The rendered depth map (H, W, 1) or (H, W).
+        disparity_tensor: The ground-truth disparity map (H_target, W_target).
+        depth_loss_weight: The weight applied to the final combined loss.
+        border_ratio: Fraction of the border to exclude from comparison.
+        save_debug_plot: If True, calls a helper to save a debug image.
+
+    Returns:
+        The weighted scale-invariant depth loss.
+    """
+    def create_border_mask(H: int, W: int, ratio: float) -> torch.Tensor:
+        """Creates a boolean mask that is False near the borders."""
+        device = rendered_depth.device
+        mask = torch.zeros((H, W), device=device, dtype=torch.bool)
+        
+        h_start = int(H * ratio)
+        h_end = H - int(H * ratio) * 2
+        w_start = int(W * ratio)
+        w_end = W - w_start
+        
+        # Set the interior region to True (1)
+        if h_end > h_start and w_end > w_start:
+            mask[h_start:h_end, w_start:w_end] = True
+        
+        return mask
+
+    device = rendered_depth.device
+    
+    # 1. Prepare and Resize Data
+
+    H_target, W_target = disparity_tensor.shape
+
+    # Ensure rendered_depth is (1, 1, H, W) for F.interpolate, original is (H, W, 1)
+    rendered_depth_interp = rendered_depth.squeeze(-1).unsqueeze(0).unsqueeze(0) 
+    rendered_depth_resized = F.interpolate(rendered_depth_interp, size=(H_target, W_target), mode='bilinear', align_corners=False)
+    rendered_depth_resized = rendered_depth_resized.squeeze(0).squeeze(0) # return to (H,W) to match disparity tensor
+    disparity_tensor = disparity_tensor.to(rendered_depth_resized.dtype).to(device) 
+    epsilon = 1e-6
+
+    # Create mask for depth/disparity maps
+    mask_valid = (rendered_depth_resized > epsilon) & (disparity_tensor > epsilon)
+    border_mask = create_border_mask(H_target, W_target, border_ratio)
+    final_mask = mask_valid & border_mask
+
+    if not final_mask.any():
+        return torch.tensor(0.0, device=device, dtype=rendered_depth_resized.dtype)
+
+    # 3. Apply the Final Mask and Calculate Scale-Invariant Loss
+    rendered_depth_valid = rendered_depth_resized[final_mask]
+    disparity_valid = disparity_tensor[final_mask]
+    
+    rendered_disparity_valid = 1.0 / rendered_depth_valid  # Convert depth to disparity
+
+    # D_pred_disp = rendered_depth_valid 
+    d = torch.log(rendered_disparity_valid) - torch.log(disparity_valid)
+    loss_scale_invariant = torch.mean(d ** 2) - (d.mean() ** 2)
+
+    return depth_loss_weight * loss_scale_invariant
 
 @torch_compile()
 def get_viewmat(optimized_camera_to_world):
@@ -86,7 +157,7 @@ class SplatfactoModelConfig(ModelConfig):
     """Splatfacto Model Config, nerfstudio's implementation of Gaussian Splatting"""
 
     _target: Type = field(default_factory=lambda: SplatfactoModel)
-    warmup_length: int = 500
+    warmup_length: int = 3000
     """period of steps where refinement is turned off"""
     refine_every: int = 100
     """period of steps where gaussians are culled and densified"""
@@ -96,7 +167,7 @@ class SplatfactoModelConfig(ModelConfig):
     """Whether to randomize the background color."""
     num_downscales: int = 2
     """at the beginning, resolution is 1/2^d, where d is this number"""
-    cull_alpha_thresh: float = 0.1
+    cull_alpha_thresh: float = 0.005
     """threshold of opacity for culling gaussians. One can set it to a lower value (e.g. 0.005) for higher quality."""
     cull_scale_thresh: float = 0.5
     """threshold of scale for culling huge gaussians"""
@@ -110,7 +181,7 @@ class SplatfactoModelConfig(ModelConfig):
     """below this size, gaussians are *duplicated*, otherwise split"""
     n_split_samples: int = 2
     """number of samples to split gaussians into"""
-    sh_degree_interval: int = 1000
+    sh_degree_interval: int = 2000
     """every n intervals turn on another sh degree"""
     cull_screen_size: float = 0.15
     """if a gaussian is more than this percent of screen space, cull it"""
@@ -126,11 +197,11 @@ class SplatfactoModelConfig(ModelConfig):
     "Size of the cube to initialize random gaussians within"
     ssim_lambda: float = 0.2
     """weight of ssim loss"""
-    stop_split_at: int = 15000
+    stop_split_at: int = 40000
     """stop splitting at this step"""
     sh_degree: int = 3
     """maximum degree of spherical harmonics to use"""
-    use_scale_regularization: bool = False
+    use_scale_regularization: bool = True
     """If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians."""
     max_gauss_ratio: float = 10.0
     """threshold of ratio of gaussian max to min scale before applying regularization
@@ -138,7 +209,7 @@ class SplatfactoModelConfig(ModelConfig):
     """
     output_depth_during_training: bool = False
     """If True, output depth during training. Otherwise, only output depth during evaluation."""
-    rasterize_mode: Literal["classic", "antialiased"] = "classic"
+    rasterize_mode: Literal["classic", "antialiased"] = "antialiased"
     """
     Classic mode of rendering will use the EWA volume splatting with a [0.3, 0.3] screen space blurring kernel. This
     approach is however not suitable to render tiny gaussians at higher or lower resolution than the captured, which
@@ -150,21 +221,21 @@ class SplatfactoModelConfig(ModelConfig):
     """
     camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="off"))
     """Config of the camera optimizer to use"""
-    use_bilateral_grid: bool = False
-    """If True, use bilateral grid to handle the ISP changes in the image space. This technique was introduced in the paper 'Bilateral Guided Radiance Field Processing' (https://bilarfpro.github.io/)."""
-    grid_shape: Tuple[int, int, int] = (16, 16, 8)
+    use_bilateral_grid: bool = True
+    """If True, use bilateral grid to handle the ISP changes in the image space. This technique was introduced in the paper x'Bilateral Guided Radiance Field Processing' (https://bilarfpro.github.io/)."""
+    grid_shape: Tuple[int, int, int] = (20, 20, 5)
     """Shape of the bilateral grid (X, Y, W)"""
     color_corrected_metrics: bool = False
     """If True, apply color correction to the rendered images before computing the metrics."""
     strategy: Literal["default", "mcmc"] = "default"
     """The default strategy will be used if strategy is not specified. Other strategies, e.g. mcmc, can be used."""
-    max_gs_num: int = 1_000_000
+    max_gs_num: int = 3_000_000
     """Maximum number of GSs. Default to 1_000_000."""
-    noise_lr: float = 5e5
+    noise_lr: float = 1e2
     """MCMC samping noise learning rate. Default to 5e5."""
-    mcmc_opacity_reg: float = 0.01
+    mcmc_opacity_reg: float = 0.1
     """Regularization term for opacity in MCMC strategy. Only enabled when using MCMC strategy"""
-    mcmc_scale_reg: float = 0.01
+    mcmc_scale_reg: float = .1
     """Regularization term for scale in MCMC strategy. Only enabled when using MCMC strategy"""
 
 
@@ -562,10 +633,11 @@ class SplatfactoModel(Model):
             Ks=K,  # [1, 3, 3]
             width=W,
             height=H,
-            packed=False,
+            radius_clip = 3,
+            packed=True,
             near_plane=0.01,
             far_plane=1e10,
-            render_mode=render_mode,
+            render_mode="RGB+ED",
             sh_degree=sh_degree_to_use,
             sparse_grad=False,
             absgrad=self.strategy.absgrad if isinstance(self.strategy, DefaultStrategy) else False,
@@ -649,7 +721,7 @@ class SplatfactoModel(Model):
         self.camera_optimizer.get_metrics_dict(metrics_dict)
         return metrics_dict
 
-    def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
+    def get_loss_dict(self, outputs, batch, disparity_tensor, metrics_dict=None) -> Dict[str, torch.Tensor]:
         """Computes and returns the losses dict.
 
         Args:
@@ -685,8 +757,12 @@ class SplatfactoModel(Model):
         else:
             scale_reg = torch.tensor(0.0).to(self.device)
 
+        pred_img_ssim = pred_img.permute(2, 0, 1)[None, ...]
+        gt_img_ssim = gt_img.permute(2, 0, 1)[None, ...]
+        #depth_loss = compute_depth_loss(outputs["depth"], disparity_tensor)
+
         loss_dict = {
-            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,
+            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,# + depth_loss,
             "scale_reg": scale_reg,
         }
 
@@ -726,7 +802,6 @@ class SplatfactoModel(Model):
         self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
         """Writes the test image outputs.
-
         Args:
             image_idx: Index of the image.
             step: Current step.
