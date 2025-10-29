@@ -660,11 +660,13 @@ method_configs["splatfacto-big"] = TrainerConfig(
         datamanager=FullImageDatamanagerConfig(
             dataparser=NerfstudioDataParserConfig(load_3D_points=True),
             cache_images_type="uint8",
+            cache_images="disk"
         ),
         model=SplatfactoModelConfig(
-            cull_alpha_thresh=0.005,
-            densify_grad_thresh=0.0005,
+            cull_alpha_thresh=0.00005,
+            densify_grad_thresh=0.0002,
             cull_screen_size=.1,
+            output_depth_during_training=True
         ),
     ),
     optimizers={
@@ -688,7 +690,7 @@ method_configs["splatfacto-big"] = TrainerConfig(
             "scheduler": None,
         },
         "scales": {
-            "optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15),
+            "optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15),
             "scheduler": None,
         },
         "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": None},
@@ -715,7 +717,7 @@ method_configs["splatfacto-mcmc"] = TrainerConfig(
     steps_per_eval_batch=0,
     steps_per_save=2000,
     steps_per_eval_all_images=1000,
-    max_num_iterations=60000,
+    max_num_iterations=70000,
     mixed_precision=False,
     pipeline=VanillaPipelineConfig(
         datamanager=FullImageDatamanagerConfig(
@@ -724,18 +726,20 @@ method_configs["splatfacto-mcmc"] = TrainerConfig(
             cache_images = "disk",
         ),
         model=SplatfactoModelConfig(
-            use_bilateral_grid=True,
+            num_downscales=0,
+            use_bilateral_grid=False,
             grid_shape = (16,16,8),
             warmup_length=3000,
-            refine_every=1000,
+            refine_every=5000,
             strategy="mcmc",
             num_random = 100000,
-            max_gs_num = 6000000,
-            noise_lr =  5e5,
-            mcmc_opacity_reg = 0.1,
+            max_gs_num = 5000000,
+            noise_lr =  .5,
+            mcmc_opacity_reg = 0.01,
             mcmc_scale_reg = .01,
-            cull_alpha_thresh=0.007,
-            stop_split_at=50000,
+            cull_alpha_thresh=0.00005,
+            stop_split_at=100000,
+            output_depth_during_training=True
         ),
     ),
     optimizers={
@@ -743,7 +747,7 @@ method_configs["splatfacto-mcmc"] = TrainerConfig(
             "optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15),
             "scheduler": ExponentialDecaySchedulerConfig(
                 lr_final=1.6e-6,
-                max_steps=25000,
+                max_steps=80000,
             ),
         },
         "features_dc": {
@@ -755,14 +759,14 @@ method_configs["splatfacto-mcmc"] = TrainerConfig(
             "scheduler": None,
         },
         "opacities": {
-            "optimizer": AdamOptimizerConfig(lr=0.05, eps=1e-15),
+            "optimizer": AdamOptimizerConfig(lr=0.1, eps=1e-15),
             "scheduler": None,
         },
         "scales": {
-            "optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15),
+            "optimizer": AdamOptimizerConfig(lr=0.0005, eps=1e-15),
             "scheduler": None,
         },
-        "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": None},
+        "quats": {"optimizer": AdamOptimizerConfig(lr=0.0001, eps=1e-15), "scheduler": None},
         
         "camera_opt": {
             "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),

@@ -596,6 +596,7 @@ class ExportGaussianSplat(Exporter):
                         "Warning: model has higher level of spherical harmonics, ignoring them and only export rgb."
                     )
                 elif self.ply_color_mode == "sh_coeffs":
+                    
                     # transpose(1, 2) was needed to match the sh order in Inria version
                     shs_rest = model.shs_rest.transpose(1, 2).contiguous().cpu().numpy()
                     shs_rest = shs_rest.reshape((n, -1))

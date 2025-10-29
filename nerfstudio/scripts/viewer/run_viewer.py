@@ -26,6 +26,9 @@ from threading import Lock
 from typing import Literal
 
 import tyro
+import numpy as np
+import json
+import torch
 
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.engine.trainer import TrainerConfig
@@ -92,6 +95,7 @@ def _start_viewer(config: TrainerConfig, pipeline: Pipeline, step: int):
     banner_messages = None
     viewer_state = None
     viewer_callback_lock = Lock()
+
     if config.vis == "viewer_legacy":
         viewer_state = ViewerLegacyState(
             config.viewer,

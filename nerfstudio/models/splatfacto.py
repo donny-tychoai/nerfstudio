@@ -25,6 +25,8 @@ from typing import Dict, List, Literal, Optional, Tuple, Type, Union
 import torch
 import torch.nn.functional as F
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
+import json
+import numpy as np
 
 try:
     from gsplat.rendering import rasterization
@@ -131,7 +133,7 @@ def compute_depth_loss(
     d = torch.log(rendered_disparity_valid) - torch.log(disparity_valid)
     loss_scale_invariant = torch.mean(d ** 2) - (d.mean() ** 2)
 
-    return depth_loss_weight * loss_scale_invariant
+    return loss_scale_invariant
 
 @torch_compile()
 def get_viewmat(optimized_camera_to_world):
@@ -163,7 +165,7 @@ class SplatfactoModelConfig(ModelConfig):
     """period of steps where gaussians are culled and densified"""
     resolution_schedule: int = 3000
     """training starts at 1/d resolution, every n steps this is doubled"""
-    background_color: Literal["random", "black", "white"] = "random"
+    background_color: Literal["random", "black", "white"] = "white"
     """Whether to randomize the background color."""
     num_downscales: int = 2
     """at the beginning, resolution is 1/2^d, where d is this number"""
@@ -180,7 +182,7 @@ class SplatfactoModelConfig(ModelConfig):
     densify_size_thresh: float = 0.01
     """below this size, gaussians are *duplicated*, otherwise split"""
     n_split_samples: int = 2
-    """number of samples to split gaussians into"""
+    """number of samples to split gazussians into"""
     sh_degree_interval: int = 2000
     """every n intervals turn on another sh degree"""
     cull_screen_size: float = 0.15
@@ -197,6 +199,10 @@ class SplatfactoModelConfig(ModelConfig):
     "Size of the cube to initialize random gaussians within"
     ssim_lambda: float = 0.2
     """weight of ssim loss"""
+    use_depth_loss: bool = False
+    """whether or not to use scale and shift invariant depth regularization"""
+    depth_lambda: float = 0.0
+    """weight of depth loss (if used)"""
     stop_split_at: int = 40000
     """stop splitting at this step"""
     sh_degree: int = 3
@@ -304,6 +310,10 @@ class SplatfactoModel(Model):
         self.camera_optimizer: CameraOptimizer = self.config.camera_optimizer.setup(
             num_cameras=self.num_train_data, device="cpu"
         )
+
+        ## depth regularization
+        self.use_depth_loss = self.config.use_depth_loss
+        self.depth_lambda = self.config.depth_lambda
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -623,28 +633,144 @@ class SplatfactoModel(Model):
             colors_crop = torch.sigmoid(colors_crop).squeeze(1)  # [N, 1, 3] -> [N, 3]
             sh_degree_to_use = None
 
-        render, alpha, self.info = rasterization(  # type: ignore[reportPossiblyUnboundVariable]
-            means=means_crop,
-            quats=quats_crop,  # rasterization does normalization internally
-            scales=torch.exp(scales_crop),
-            opacities=torch.sigmoid(opacities_crop).squeeze(-1),
-            colors=colors_crop,
-            viewmats=viewmat,  # [1, 4, 4]
-            Ks=K,  # [1, 3, 3]
-            width=W,
-            height=H,
-            radius_clip = 3,
-            packed=True,
-            near_plane=0.01,
-            far_plane=1e10,
-            render_mode="RGB+ED",
-            sh_degree=sh_degree_to_use,
-            sparse_grad=False,
-            absgrad=self.strategy.absgrad if isinstance(self.strategy, DefaultStrategy) else False,
-            rasterize_mode=self.config.rasterize_mode,
-            # set some threshold to disregrad small gaussians for faster rendering.
-            # radius_clip=3.0,
-        )
+        ## Add planner solutions to rasterization call ##
+        if False:
+            with open("planner_solutions.json", "r") as f:
+                json_planner_solutions = json.load(f)
+
+            # 1. INITIALIZE LISTS TO ACCUMULATE TRAJECTORY DATA
+            all_traj_means = []
+            all_traj_quats = []
+            all_traj_scales = []
+            all_traj_opacities = []
+            all_traj_colors_expanded = []
+
+            # Assuming means_crop is already on the correct device for the new tensors
+            device = means_crop.device
+            NUM_SH_COMPONENTS = colors_crop.shape[1] # Automatically derive from the cropped color tensor
+
+            # 2. ACCUMULATE TRAJECTORY DATA FOR ALL SEGMENTS
+            for i in range(10):
+                segment_name = f"segment_{i}"
+                if segment_name not in json_planner_solutions:
+                    continue
+
+                xyz_points = [point[:3] for point in json_planner_solutions[segment_name]["optimal_curve_ns"]]
+                xzy_points = [[x,z,-y] for (x,y,z) in xyz_points] 
+                P = len(xyz_points)
+                if P == 0:
+                    continue
+
+                # Create trajectory Tensors (must be on the correct device)
+                traj_means = torch.tensor(xyz_points, dtype=torch.float32, device=device)
+
+                # Quaternions 
+                new_quats_np = np.zeros((P, 4), dtype=np.float32)
+                new_quats_np[:, 3] = 1.0
+                traj_quats = torch.from_numpy(new_quats_np).float().to(device)
+
+                # Scales
+                INITIAL_SCALE_M = .01
+                log_scale = np.log(INITIAL_SCALE_M)
+                new_scales_np = np.full((P, 3), log_scale, dtype=np.float32) # Log scale
+                traj_scales = torch.from_numpy(new_scales_np).float().to(device)
+                
+                # COLORS (DC/L0) - Green
+                COLOR_RGB = np.array([0.1, 1.0, 0.1], dtype=np.float32)
+                traj_colors = torch.from_numpy(np.tile(COLOR_RGB, (P, 1))).float().to(device)
+
+                # OPACITIES (Logit Space) - Opaque
+                ALPHA = 0.99
+                logit_alpha = np.log(ALPHA / (1.0 - ALPHA))
+                traj_opacities = torch.full((P, 1), logit_alpha, dtype=torch.float32, device=device)
+
+                # --- EXPAND COLORS (L0 + ZERO SH COEFFICIENTS) ---
+                traj_colors_L0 = traj_colors.unsqueeze(1) # (P, 1, 3)
+                traj_colors_SH_zeros = torch.zeros(
+                    (P, NUM_SH_COMPONENTS - 1, 3), 
+                    dtype=traj_colors.dtype, 
+                    device=device
+                )
+                traj_colors_expanded = torch.cat([traj_colors_L0, traj_colors_SH_zeros], dim=1)
+                
+                # --- ADD TO ACCUMULATION LISTS ---
+                all_traj_means.append(traj_means)
+                all_traj_quats.append(traj_quats)
+                all_traj_scales.append(traj_scales)
+                all_traj_opacities.append(traj_opacities)
+                all_traj_colors_expanded.append(traj_colors_expanded)
+
+            # --- 3. CONCATENATE ACCUMULATED TRAJECTORY TOTALS ---
+            if all_traj_means:
+                traj_means_total = torch.cat(all_traj_means, dim=0)
+                traj_quats_total = torch.cat(all_traj_quats, dim=0)
+                traj_scales_total = torch.cat(all_traj_scales, dim=0)
+                traj_opacities_total = torch.cat(all_traj_opacities, dim=0)
+                traj_colors_total = torch.cat(all_traj_colors_expanded, dim=0)
+
+                # --- 4. CONCATENATE TRAJECTORY TOTALS WITH CROPPED SCENE GAUSSIANS ---
+                # NOTE: The scene Gaussians (*_crop) are in LOG/LOGIT space where applicable!
+
+                # Correct Scale Concatenation: means_crop is log(scale), traj_scales_total is log(scale)
+                means_combined = torch.cat([means_crop, traj_means_total], dim=0)
+                quats_combined = torch.cat([quats_crop, traj_quats_total], dim=0)
+                scales_combined = torch.cat([scales_crop, traj_scales_total], dim=0) # Both are log-scale
+                opacities_combined = torch.cat([opacities_crop, traj_opacities_total], dim=0) # Both are logit-opacity
+                colors_combined = torch.cat([colors_crop, traj_colors_total], dim=0)
+            else:
+                # If no trajectory points exist, use the original cropped tensors
+                means_combined = means_crop
+                quats_combined = quats_crop
+                scales_combined = scales_crop
+                opacities_combined = opacities_crop
+                colors_combined = colors_crop
+                
+            #--- 5. RASTERIZATION CALL (Using combined tensors) ---
+            render, alpha, self.info = rasterization( 
+                means=means_combined,
+                quats=quats_combined,  # Quats are used as-is
+                scales=torch.exp(scales_combined), # Must be converted back to linear scale
+                opacities=torch.sigmoid(opacities_combined).squeeze(-1), # Must be converted back to linear opacity
+                colors=colors_combined,
+                viewmats=viewmat,  # [1, 4, 4]
+                Ks=K,  # [1, 3, 3]
+                width=W,
+                height=H,
+                radius_clip = 3,
+                packed=True,
+                near_plane=0.01,
+                far_plane=1e10,
+                render_mode="RGB+ED",
+                sh_degree=sh_degree_to_use,
+                sparse_grad=False,
+                absgrad=self.strategy.absgrad if isinstance(self.strategy, DefaultStrategy) else False,
+                rasterize_mode=self.config.rasterize_mode,
+                # set some threshold to disregrad small gaussians for faster rendering.
+                # radius_clip=3.0,
+            )
+        else:
+            render, alpha, self.info = rasterization( 
+                means=means_crop,
+                quats=quats_crop,  # rasterization does normalization internally
+                scales=torch.exp(scales_crop),
+                opacities=torch.sigmoid(opacities_crop).squeeze(-1),
+                colors=colors_crop,
+                viewmats=viewmat,  # [1, 4, 4]
+                Ks=K,  # [1, 3, 3]
+                width=W,
+                height=H,
+                radius_clip = 3,
+                packed=False,
+                near_plane=0.01,
+                far_plane=1e10,
+                render_mode="RGB+ED",
+                sh_degree=sh_degree_to_use,
+                sparse_grad=False,
+                absgrad=self.strategy.absgrad if isinstance(self.strategy, DefaultStrategy) else False,
+                rasterize_mode=self.config.rasterize_mode,
+                # set some threshold to disregrad small gaussians for faster rendering.
+                # radius_clip=3.0,
+            )
         if self.training:
             self.strategy.step_pre_backward(
                 self.gauss_params, self.optimizers, self.strategy_state, self.step, self.info
@@ -759,12 +885,19 @@ class SplatfactoModel(Model):
 
         pred_img_ssim = pred_img.permute(2, 0, 1)[None, ...]
         gt_img_ssim = gt_img.permute(2, 0, 1)[None, ...]
-        #depth_loss = compute_depth_loss(outputs["depth"], disparity_tensor)
+        depth_loss = compute_depth_loss(outputs["depth"], disparity_tensor)
 
-        loss_dict = {
-            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,# + depth_loss,
-            "scale_reg": scale_reg,
-        }
+        if self.use_depth_loss:
+            loss_dict = {
+                "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss + self.depth_lambda *depth_loss,
+                "scale_reg": scale_reg,
+            }
+        else:
+            loss_dict = {
+                "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda,
+                "scale_reg": scale_reg,
+            }
+
 
         # Losses for mcmc
         if self.config.strategy == "mcmc":

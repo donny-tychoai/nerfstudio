@@ -172,13 +172,14 @@ class RenderStateMachine(threading.Thread):
                 finally:
                     if was_training:
                         self.viewer.get_model().train()
+                        
             num_rays = (camera.height * camera.width).item()
             if self.viewer.control_panel.layer_depth:
                 if isinstance(self.viewer.get_model(), SplatfactoModel):
+
                     # Gaussians render much faster than we can send depth images, so we do some downsampling.
                     assert len(outputs["depth"].shape) == 3
                     assert outputs["depth"].shape[-1] == 1
-
                     desired_depth_pixels = {"low_move": 128, "low_static": 128, "high": 512}[self.state] ** 2
                     current_depth_pixels = outputs["depth"].shape[0] * outputs["depth"].shape[1]
 
@@ -257,6 +258,7 @@ class RenderStateMachine(threading.Thread):
         self.viewer.update_colormap_options(
             dimensions=outputs[output_render].shape[-1], dtype=outputs[output_render].dtype
         )
+
         selected_output = colormaps.apply_colormap(
             image=outputs[self.viewer.control_panel.output_render],
             colormap_options=self.viewer.control_panel.colormap_options,
@@ -307,12 +309,14 @@ class RenderStateMachine(threading.Thread):
             if self.viewer.render_tab_state.preview_render
             else 40
         )
+
         self.client.scene.set_background_image(
             selected_output,
             format=self.viewer.config.image_format,
             jpeg_quality=jpg_quality,
             depth=depth,
         )
+        
         res = f"{selected_output.shape[1]}x{selected_output.shape[0]}px"
         self.viewer.stats_markdown.content = self.viewer.make_stats_markdown(None, res)
 
